@@ -93,13 +93,7 @@ php artisan view:cache
 ### ب) سحب وتجهيز المتجر (Storefront - printexpress.com.eg):
 ```bash
 cd ~/printexpress.com.eg
-git init
-git remote add origin https://YOUR_GITHUB_TOKEN@github.com/ahmed-abdel-aal-a/printexpress.com.eg.git
-git fetch origin main
-git checkout -f main
-
-# تثبيت الحزم (الإنتاج فقط)
-npm install --omit=dev
+git pull origin main
 ```
 
 ---
@@ -107,38 +101,32 @@ npm install --omit=dev
 ### ج) سحب وتجهيز لوحة التحكم (Dashboard - admin.printexpress.com.eg):
 ```bash
 cd ~/admin.printexpress.com.eg
-git init
-git remote add origin https://YOUR_GITHUB_TOKEN@github.com/ahmed-abdel-aal-a/admin.printexpress.com.eg.git
-git fetch origin main
-git checkout -f main
-
-# تثبيت الحزم (الإنتاج فقط)
-npm install --omit=dev
+git pull origin main
 ```
 
 ---
 
 ## ⚡ 4. تشغيل التطبيقات في الخلفية على المنافذ الرسمية (PM2)
 
-> التطبيقات مبنية وجاهزة (Pre-built)، فقط يتم تشغيلها بالبورتات المعتمدة:
+> التطبيقات مدمجة بالكامل مع حزمها التشغيلية (Zero-Dependency Standalone Bundle)، وتعمل فوراً عبر Node.js:
 
 ```bash
-# تثبيت PM2 عالمياً (إذا لم يكن مثبتاً)
-npm install -g pm2
+# 1. إيقاف أي عمليات سابقة إن وجدت
+pm2 delete all
 
-# 1. تشغيل الباك إند (Port: 2080)
+# 2. تشغيل الباك إند (Port: 2080)
 cd ~/apex-backend
 pm2 start "php artisan serve --host=127.0.0.1 --port=2080" --name "apex-backend"
 
-# 2. تشغيل المتجر (Port: 2000)
+# 3. تشغيل المتجر (Port: 2000)
 cd ~/printexpress.com.eg
-pm2 start "npm start -- -p 2000" --name "apex-storefront"
+PORT=2000 HOSTNAME=127.0.0.1 pm2 start .next/standalone/server.js --name "apex-storefront"
 
-# 3. تشغيل لوحة التحكم (Port: 2050)
+# 4. تشغيل لوحة التحكم (Port: 2050)
 cd ~/admin.printexpress.com.eg
-pm2 start "npm start -- -p 2050" --name "apex-dashboard"
+PORT=2050 HOSTNAME=127.0.0.1 pm2 start .next/standalone/server.js --name "apex-dashboard"
 
-# حفظ العمليات لتعمل تلقائياً عند إعادة تشغيل السيرفر
+# 5. حفظ العمليات لتعمل تلقائياً عند إعادة تشغيل السيرفر
 pm2 save
 ```
 
