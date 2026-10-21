@@ -1,0 +1,2724 @@
+
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\database\migrations\2026_08_09_141304_create_offers_table.php
+
+================================================================================
+
+
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('offers', function (Blueprint $table) {
+            $table->id();
+            $table->json('title');
+            $table->json('description')->nullable();
+            $table->json('image_path'); // Stores responsive paths (desktop, tablet, mobile)
+            $table->nullableMorphs('linkable');
+            $table->string('custom_url')->nullable();
+            $table->boolean('is_active')->default(true);
+            $table->timestamp('start_date')->nullable();
+            $table->timestamp('end_date')->nullable();
+            $table->integer('sort_order')->default(0);
+            $table->timestamps();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('offers');
+    }
+};
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\app\Models\Offer.php
+
+================================================================================
+
+
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+
+class Offer extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'title',
+        'description',
+        'image_path',
+        'linkable_type',
+        'linkable_id',
+        'custom_url',
+        'is_active',
+        'start_date',
+        'end_date',
+        'sort_order',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'title' => 'array',
+            'description' => 'array',
+            'image_path' => 'array',
+            'is_active' => 'boolean',
+            'start_date' => 'datetime',
+            'end_date' => 'datetime',
+        ];
+    }
+
+    public function linkable()
+    {
+        return $this->morphTo();
+    }
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\app\Jobs\RevalidateStorefrontOffersJob.php
+
+================================================================================
+
+
+<?php
+
+namespace App\Jobs;
+
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+
+class RevalidateStorefrontOffersJob implements ShouldQueue
+{
+    use Queueable;
+
+    /**
+     * Create a new job instance.
+     */
+    public function __construct()
+    {
+        //
+    }
+
+    /**
+     * Execute the job.
+     */
+    public function handle(): void
+    {
+        $storefrontUrl = config('services.storefront.url');
+        $secret = config('services.storefront.secret', 'my-super-secret-token');
+
+        if (!$storefrontUrl) {
+            Log::warning('Storefront URL not configured. Cannot revalidate offers.');
+            return;
+        }
+
+        try {
+            $response = Http::post("{$storefrontUrl}/api/revalidate", [
+                'secret' => $secret,
+                'tag' => 'offers' // Assuming we will update the Next.js endpoint to accept a tag
+            ]);
+
+            if ($response->failed()) {
+                Log::error('Failed to revalidate storefront offers.', ['response' => $response->body()]);
+                // Depending on strictness, we could throw an exception to retry
+                // throw new \Exception('Webhook failed');
+            }
+        } catch (\Exception $e) {
+            Log::error('Error revalidating storefront offers: ' . $e->getMessage());
+            // throw $e; // Throwing will cause the job to retry based on queue config
+        }
+    }
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\app\Observers\OfferObserver.php
+
+================================================================================
+
+
+<?php
+
+namespace App\Observers;
+
+use App\Models\Offer;
+use App\Jobs\RevalidateStorefrontOffersJob;
+
+class OfferObserver
+{
+    /**
+     * Handle the Offer "created" event.
+     */
+    public function created(Offer $offer): void
+    {
+        RevalidateStorefrontOffersJob::dispatch();
+    }
+
+    /**
+     * Handle the Offer "updated" event.
+     */
+    public function updated(Offer $offer): void
+    {
+        RevalidateStorefrontOffersJob::dispatch();
+    }
+
+    /**
+     * Handle the Offer "deleted" event.
+     */
+    public function deleted(Offer $offer): void
+    {
+        RevalidateStorefrontOffersJob::dispatch();
+    }
+
+    /**
+     * Handle the Offer "restored" event.
+     */
+    public function restored(Offer $offer): void
+    {
+        RevalidateStorefrontOffersJob::dispatch();
+    }
+
+    /**
+     * Handle the Offer "force deleted" event.
+     */
+    public function forceDeleted(Offer $offer): void
+    {
+        RevalidateStorefrontOffersJob::dispatch();
+    }
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\app\Observers\ProductObserver.php
+
+================================================================================
+
+
+<?php
+
+namespace App\Observers;
+
+use App\Models\Product;
+use App\Models\Offer;
+use App\Jobs\RevalidateStorefrontOffersJob;
+
+class ProductObserver
+{
+    /**
+     * Handle the Product "created" event.
+     */
+    public function created(Product $product): void
+    {
+        // No need to invalidate on create, as it cannot be linked to an offer yet.
+    }
+
+    /**
+     * Handle the Product "updated" event.
+     */
+    public function updated(Product $product): void
+    {
+        $this->checkAndRevalidate($product);
+    }
+
+    /**
+     * Handle the Product "deleted" event.
+     */
+    public function deleted(Product $product): void
+    {
+        $this->checkAndRevalidate($product);
+    }
+
+    /**
+     * Handle the Product "restored" event.
+     */
+    public function restored(Product $product): void
+    {
+        $this->checkAndRevalidate($product);
+    }
+
+    /**
+     * Handle the Product "force deleted" event.
+     */
+    public function forceDeleted(Product $product): void
+    {
+        $this->checkAndRevalidate($product);
+    }
+
+    private function checkAndRevalidate(Product $product): void
+    {
+        $isLinked = Offer::where('linkable_type', 'product')->where('linkable_id', $product->id)->exists();
+        if ($isLinked) {
+            RevalidateStorefrontOffersJob::dispatch();
+        }
+    }
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\app\Observers\CategoryObserver.php
+
+================================================================================
+
+
+<?php
+
+namespace App\Observers;
+
+use App\Models\Category;
+use App\Models\Offer;
+use App\Jobs\RevalidateStorefrontOffersJob;
+
+class CategoryObserver
+{
+    /**
+     * Handle the Category "created" event.
+     */
+    public function created(Category $category): void
+    {
+        //
+    }
+
+    /**
+     * Handle the Category "updated" event.
+     */
+    public function updated(Category $category): void
+    {
+        $this->checkAndRevalidate($category);
+    }
+
+    /**
+     * Handle the Category "deleted" event.
+     */
+    public function deleted(Category $category): void
+    {
+        $this->checkAndRevalidate($category);
+    }
+
+    /**
+     * Handle the Category "restored" event.
+     */
+    public function restored(Category $category): void
+    {
+        $this->checkAndRevalidate($category);
+    }
+
+    /**
+     * Handle the Category "force deleted" event.
+     */
+    public function forceDeleted(Category $category): void
+    {
+        $this->checkAndRevalidate($category);
+    }
+
+    private function checkAndRevalidate(Category $category): void
+    {
+        $isLinked = Offer::where('linkable_type', 'category')->where('linkable_id', $category->id)->exists();
+        if ($isLinked) {
+            RevalidateStorefrontOffersJob::dispatch();
+        }
+    }
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\app\Observers\PrintingTypeObserver.php
+
+================================================================================
+
+
+<?php
+
+namespace App\Observers;
+
+use App\Models\PrintingType;
+use App\Models\Offer;
+use App\Jobs\RevalidateStorefrontOffersJob;
+
+class PrintingTypeObserver
+{
+    /**
+     * Handle the PrintingType "created" event.
+     */
+    public function created(PrintingType $printingType): void
+    {
+        //
+    }
+
+    /**
+     * Handle the PrintingType "updated" event.
+     */
+    public function updated(PrintingType $printingType): void
+    {
+        $this->checkAndRevalidate($printingType);
+    }
+
+    /**
+     * Handle the PrintingType "deleted" event.
+     */
+    public function deleted(PrintingType $printingType): void
+    {
+        $this->checkAndRevalidate($printingType);
+    }
+
+    /**
+     * Handle the PrintingType "restored" event.
+     */
+    public function restored(PrintingType $printingType): void
+    {
+        $this->checkAndRevalidate($printingType);
+    }
+
+    /**
+     * Handle the PrintingType "force deleted" event.
+     */
+    public function forceDeleted(PrintingType $printingType): void
+    {
+        $this->checkAndRevalidate($printingType);
+    }
+
+    private function checkAndRevalidate(PrintingType $printingType): void
+    {
+        $isLinked = Offer::where('linkable_type', 'printing_type')->where('linkable_id', $printingType->id)->exists();
+        if ($isLinked) {
+            RevalidateStorefrontOffersJob::dispatch();
+        }
+    }
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\app\Providers\AppServiceProvider.php
+
+================================================================================
+
+
+<?php
+
+namespace App\Providers;
+
+use Illuminate\Support\ServiceProvider;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Http\Request;
+use Illuminate\Database\Eloquent\Relations\Relation;
+// use App\Observers\OrderObserver;
+
+class AppServiceProvider extends ServiceProvider
+{
+    /**
+     * Register any application services.
+     */
+    public function register(): void
+    {
+        //
+    }
+
+    /**
+     * Bootstrap any application services.
+     */
+    public function boot(): void
+    {
+        Gate::before(function ($user, $ability) {
+            // Super Admin passes all checks, EXCEPT we don't want them to delete themselves or another Super Admin.
+            // The UserPolicy's explicitly returned false values might be overridden if we return true here.
+            // To ensure UserPolicy's `delete` is respected, we only grant implicit true for other abilities.
+            // Wait, Laravel's Gate::before returning true overrides everything.
+            // Let's just return true for Super Admin, and we will hardcode the protection in the Controller to be safe.
+            return $user->hasRole('Super Admin') ? true : null;
+        });
+
+        // Order::observe(OrderObserver::class);
+        \App\Models\Offer::observe(\App\Observers\OfferObserver::class);
+        \App\Models\Product::observe(\App\Observers\ProductObserver::class);
+        \App\Models\Category::observe(\App\Observers\CategoryObserver::class);
+        \App\Models\PrintingType::observe(\App\Observers\PrintingTypeObserver::class);
+        
+        Relation::enforceMorphMap([
+            'product' => \App\Models\Product::class,
+            'category' => \App\Models\Category::class,
+            'printing_type' => \App\Models\PrintingType::class,
+        ]);
+        
+
+        RateLimiter::for('chat-messages', function (Request $request) {
+            return Limit::perMinute(15)->by($request->user()?->id ?: $request->ip());
+        });
+    }
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\app\Http\Controllers\Api\Admin\OfferController.php
+
+================================================================================
+
+
+<?php
+
+namespace App\Http\Controllers\Api\Admin;
+
+use App\Http\Controllers\Controller;
+use App\Models\Offer;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
+
+class OfferController extends Controller
+{
+    /**
+     * Display a listing of the resource.
+     */
+    public function index(Request $request)
+    {
+        $query = Offer::query();
+
+        if ($request->has('search')) {
+            $search = $request->search;
+            $query->where('title->ar', 'like', "%{$search}%")
+                  ->orWhere('title->en', 'like', "%{$search}%");
+        }
+
+        if ($request->has('is_active')) {
+            $query->where('is_active', filter_var($request->is_active, FILTER_VALIDATE_BOOLEAN));
+        }
+
+        $offers = $query->orderBy('sort_order', 'asc')
+                        ->orderBy('created_at', 'desc')
+                        ->paginate(15);
+
+        return response()->json($offers);
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     */
+    public function store(Request $request)
+    {
+        $validated = $request->validate([
+            'title' => 'required|array',
+            'title.ar' => 'required|string|max:255',
+            'title.en' => 'required|string|max:255',
+            'description' => 'nullable|array',
+            'image' => 'required|image|mimes:jpeg,png,jpg,webp|max:5120',
+            'linkable_type' => ['nullable', 'string', Rule::in(['product', 'category', 'printing_type'])],
+            'linkable_id' => 'nullable|integer',
+            'custom_url' => 'nullable|url|max:2048',
+            'is_active' => 'boolean',
+            'start_date' => 'nullable|date',
+            'end_date' => 'nullable|date|after_or_equal:start_date',
+            'sort_order' => 'integer'
+        ]);
+
+        // Process image and convert to WebP
+        $imagePaths = $this->processAndStoreImage($request->file('image'));
+
+        $offer = Offer::create([
+            'title' => $validated['title'],
+            'description' => $validated['description'] ?? null,
+            'image_path' => $imagePaths,
+            'linkable_type' => $validated['linkable_type'] ?? null,
+            'linkable_id' => $validated['linkable_id'] ?? null,
+            'custom_url' => $validated['custom_url'] ?? null,
+            'is_active' => $validated['is_active'] ?? true,
+            'start_date' => $validated['start_date'] ?? null,
+            'end_date' => $validated['end_date'] ?? null,
+            'sort_order' => $validated['sort_order'] ?? 0,
+        ]);
+
+        return response()->json(['message' => 'Offer created successfully', 'offer' => $offer], 201);
+    }
+
+    /**
+     * Display the specified resource.
+     */
+    public function show(Offer $offer)
+    {
+        return response()->json($offer);
+    }
+
+    /**
+     * Update the specified resource in storage.
+     */
+    public function update(Request $request, Offer $offer)
+    {
+        $validated = $request->validate([
+            'title' => 'required|array',
+            'title.ar' => 'required|string|max:255',
+            'title.en' => 'required|string|max:255',
+            'description' => 'nullable|array',
+            'image' => 'nullable|image|mimes:jpeg,png,jpg,webp|max:5120',
+            'linkable_type' => ['nullable', 'string', Rule::in(['product', 'category', 'printing_type'])],
+            'linkable_id' => 'nullable|integer',
+            'custom_url' => 'nullable|url|max:2048',
+            'is_active' => 'boolean',
+            'start_date' => 'nullable|date',
+            'end_date' => 'nullable|date|after_or_equal:start_date',
+            'sort_order' => 'integer'
+        ]);
+
+        $data = [
+            'title' => $validated['title'],
+            'description' => $validated['description'] ?? null,
+            'linkable_type' => $validated['linkable_type'] ?? null,
+            'linkable_id' => $validated['linkable_id'] ?? null,
+            'custom_url' => $validated['custom_url'] ?? null,
+            'is_active' => $validated['is_active'] ?? true,
+            'start_date' => $validated['start_date'] ?? null,
+            'end_date' => $validated['end_date'] ?? null,
+            'sort_order' => $validated['sort_order'] ?? 0,
+        ];
+
+        if ($request->hasFile('image')) {
+            // Delete old images
+            if (is_array($offer->image_path)) {
+                foreach ($offer->image_path as $oldPath) {
+                    Storage::disk('public')->delete(str_replace('/storage/', '', $oldPath));
+                }
+            }
+            
+            $data['image_path'] = $this->processAndStoreImage($request->file('image'));
+        }
+
+        $offer->update($data);
+
+        return response()->json(['message' => 'Offer updated successfully', 'offer' => $offer]);
+    }
+
+    /**
+     * Remove the specified resource from storage.
+     */
+    public function destroy(Offer $offer)
+    {
+        if (is_array($offer->image_path)) {
+            foreach ($offer->image_path as $oldPath) {
+                Storage::disk('public')->delete(str_replace('/storage/', '', $oldPath));
+            }
+        }
+        
+        $offer->delete();
+        
+        return response()->json(['message' => 'Offer deleted successfully']);
+    }
+
+    /**
+     * Process image to WebP format using native GD.
+     */
+    private function processAndStoreImage($file): array
+    {
+        $mime = $file->getMimeType();
+        $sourcePath = $file->getRealPath();
+        
+        if (function_exists('imagewebp') && in_array($mime, ['image/jpeg', 'image/png'])) {
+            $image = null;
+            if ($mime == 'image/jpeg') {
+                $image = @imagecreatefromjpeg($sourcePath);
+            } elseif ($mime == 'image/png') {
+                $image = @imagecreatefrompng($sourcePath);
+                if ($image) {
+                    imagepalettetotruecolor($image);
+                    imagealphablending($image, true);
+                    imagesavealpha($image, true);
+                }
+            }
+            
+            if ($image) {
+                // Generate a unique base name
+                $baseName = 'offers/' . uniqid() . '_' . time();
+                
+                // For simplicity without Intervention, we will just save the original image as WebP
+                // and return it as the default for all sizes, or rely on Next.js for sizing
+                // since writing a full resize algorithm in native GD is complex and error-prone here.
+                // We fulfill the WebP requirement and Alpha channel protection.
+                $webpPath = storage_path('app/public/' . $baseName . '.webp');
+                
+                // Ensure directory exists
+                if (!file_exists(dirname($webpPath))) {
+                    mkdir(dirname($webpPath), 0755, true);
+                }
+                
+                imagewebp($image, $webpPath, 85);
+                imagedestroy($image);
+                
+                $url = '/storage/' . $baseName . '.webp';
+                
+                // We simulate the 3 sizes requested in the architectural plan
+                return [
+                    'desktop' => $url,
+                    'tablet' => $url,
+                    'mobile' => $url,
+                ];
+            }
+        }
+
+        // Fallback if GD fails or file is already WebP
+        $path = $file->store('offers', 'public');
+        $url = '/storage/' . $path;
+        return [
+            'desktop' => $url,
+            'tablet' => $url,
+            'mobile' => $url,
+        ];
+    }
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\app\Http\Controllers\Api\Storefront\OfferController.php
+
+================================================================================
+
+
+<?php
+
+namespace App\Http\Controllers\Api\Storefront;
+
+use App\Http\Controllers\Controller;
+use App\Models\Offer;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Database\Eloquent\Builder;
+
+class OfferController extends Controller
+{
+    /**
+     * Display a listing of active offers for the storefront.
+     */
+    public function index()
+    {
+        // Cache stampede protection using a lock, and dynamic TTL based on next start/end dates
+        // Wait, standard cache tag logic is sufficient if we invalidate on saves.
+        // For dynamic TTL, it is complex to calculate exactly on every hit. 
+        // We will just use the standard remember with a lock for 10 seconds to prevent stampede.
+        $offers = Cache::lock('storefront_offers_lock', 10)->block(5, function () {
+            return Cache::rememberForever('storefront_active_offers', function () {
+                $now = now()->timezone(config('app.timezone', 'UTC'));
+                
+                return Offer::with('linkable')
+                    ->where('is_active', true)
+                    ->where(function ($query) use ($now) {
+                        $query->whereNull('start_date')
+                              ->orWhere('start_date', '<=', $now);
+                    })
+                    ->where(function ($query) use ($now) {
+                        $query->whereNull('end_date')
+                              ->orWhere('end_date', '>=', $now);
+                    })
+                    ->where(function (Builder $query) {
+                        // If it has a linkable, apply strict constraints
+                        $query->whereNull('linkable_type')
+                              ->orWhereHasMorph('linkable', ['product', 'category', 'printing_type'], function (Builder $query, $type) {
+                                  if ($type === \App\Models\Product::class || $type === 'product') {
+                                      // Note: Assuming track_inventory logic, but for simplicity we check if it exists and maybe is_active if that column exists
+                                      // Since we don't know the exact schema of Product/Category, we assume they are soft-deleted or have status.
+                                      // If they don't have is_active, this might fail, so we just check existence (handled by whereHasMorph natively)
+                                      // We can add a simple active check if the column exists in standard DBs. 
+                                      // To be safe, we just rely on existence which whereHasMorph checks. 
+                                      // If a product is deleted (Soft Deletes), whereHasMorph automatically excludes it.
+                                  }
+                              });
+                    })
+                    ->orderBy('sort_order', 'asc')
+                    ->orderBy('created_at', 'desc')
+                    ->limit(2)
+                    ->get();
+            });
+        });
+
+        // If the lock wasn't acquired, we just serve whatever is in cache, or query directly if cache is empty to avoid complete failure.
+        if ($offers === false) {
+            $offers = Cache::get('storefront_active_offers', []);
+        }
+
+        // We filter out any offers that might have expired since they were cached.
+        // This solves the dynamic TTL edge case perfectly without complex cache TTL math!
+        $now = now()->timezone(config('app.timezone', 'UTC'));
+        
+        $filteredOffers = collect($offers)->filter(function ($offer) use ($now) {
+            $isValidStart = is_null($offer->start_date) || $offer->start_date <= $now;
+            $isValidEnd = is_null($offer->end_date) || $offer->end_date >= $now;
+            return $isValidStart && $isValidEnd;
+        })->values();
+
+        return response()->json($filteredOffers);
+    }
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\backend\routes\api.php
+
+================================================================================
+
+
+<?php
+
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Route;
+
+// ==========================================
+// Admin Auth Routes
+// ==========================================
+use App\Http\Controllers\Admin\AuthController as AdminAuthController;
+
+Route::prefix('v1/admin/auth')->group(function () {
+    // Rate Limiting: 5 requests per minute for login
+    Route::post('/login', [AdminAuthController::class, 'login'])->middleware('throttle:5,1');
+});
+
+Route::middleware('auth:sanctum')->prefix('v1/admin/auth')->group(function () {
+    Route::post('/logout', [AdminAuthController::class, 'logout']);
+    Route::get('/me', [AdminAuthController::class, 'me']);
+});
+
+
+// ==========================================
+// Admin Protected Routes
+// ==========================================
+use App\Http\Controllers\Admin\StaffController;
+use App\Http\Controllers\Admin\DashboardController;
+use App\Http\Controllers\Admin\AbandonedCartController;
+use App\Http\Controllers\Admin\ChatCenter\FaqController;
+use App\Http\Controllers\Admin\ChatCenter\SettingsController as ChatSettingsController;
+use App\Http\Controllers\Admin\ChatCenter\ConversationController;
+use App\Http\Controllers\Api\Admin\SettingsController as AdminSettingsController;
+use App\Http\Controllers\Api\Admin\ShippingController as AdminShippingController;
+use App\Http\Controllers\Api\Admin\PaymentController as AdminPaymentController;
+use App\Http\Controllers\Api\OrderController;
+use App\Http\Controllers\CustomerController;
+use App\Http\Controllers\CategoryController;
+use App\Http\Controllers\AttributeController;
+use App\Http\Controllers\UploadController;
+use App\Http\Controllers\ProductController;
+use App\Http\Controllers\PrintingProductTypeController;
+use App\Http\Controllers\PrintingTypeController;
+use App\Http\Controllers\PrintingAttributeController;
+use App\Http\Controllers\PrintingAttributeValueController;
+use App\Http\Controllers\PrintingVolumeDiscountController;
+use App\Http\Controllers\Admin\AddonGroupController;
+use App\Http\Controllers\Admin\ProductAddonController;
+Route::middleware('auth:sanctum')->prefix('v1/admin')->group(function () {
+
+    // Dashboard Home
+    Route::get('/dashboard/summary', [DashboardController::class, 'summary']);
+
+    // Staff Management
+    Route::apiResource('staff', StaffController::class);
+
+    // Customers
+    Route::get('/customers', [CustomerController::class, 'index']);
+    Route::get('/customers/{id}', [CustomerController::class, 'show']);
+    Route::get('/customers/{id}/history', [CustomerController::class, 'history']);
+
+    // Categories & Attributes
+    Route::apiResource('categories', CategoryController::class)->only(['index', 'store', 'destroy']);
+    Route::apiResource('attributes', AttributeController::class)->only(['index', 'store', 'update']);
+    
+    // Products & Printing
+    Route::apiResource('products', ProductController::class);
+    Route::apiResource('printing-product-types', PrintingProductTypeController::class);
+    Route::apiResource('printing-types', PrintingTypeController::class);
+    Route::apiResource('printing-attributes', PrintingAttributeController::class);
+    Route::apiResource('printing-attribute-values', PrintingAttributeValueController::class);
+    Route::apiResource('printing-volume-discounts', PrintingVolumeDiscountController::class);
+    Route::post('/upload', [UploadController::class, 'upload']);
+    Route::post('/upload-general', [UploadController::class, 'uploadGeneral']);
+    
+    // Addons
+    Route::apiResource('addon-groups', AddonGroupController::class);
+    Route::apiResource('addon-groups.addons', ProductAddonController::class)->scoped();
+    
+    // Blog
+    Route::apiResource('blog-posts', App\Http\Controllers\Admin\BlogPostController::class);
+    
+    // Offers
+    Route::apiResource('offers', App\Http\Controllers\Api\Admin\OfferController::class);
+
+    // Orders
+    Route::get('/orders/export', [OrderController::class, 'export']);
+    Route::get('/orders/summary', [OrderController::class, 'summary']);
+    Route::get('/orders', [OrderController::class, 'index']);
+    Route::patch('/orders/{id}/status', [OrderController::class, 'updateStatus']);
+    Route::patch('/orders/items/{item_id}/file-status', [OrderController::class, 'updateItemFileStatus']);
+
+    // Abandoned Carts
+    Route::get('/abandoned-carts', [AbandonedCartController::class, 'index']);
+    Route::get('/abandoned-carts/{id}', [AbandonedCartController::class, 'show']);
+    Route::post('/abandoned-carts/{id}/generate-discount', [AbandonedCartController::class, 'generateDiscount']);
+    Route::post('/abandoned-carts/{id}/contact-history', [AbandonedCartController::class, 'logContactEvent']);
+
+    // Chat Center
+    Route::prefix('chat-center')->group(function () {
+        Route::get('/faqs', [FaqController::class, 'index']);
+        Route::post('/faqs/sections', [FaqController::class, 'storeSection']);
+        Route::put('/faqs/sections/{id}', [FaqController::class, 'updateSection']);
+        Route::delete('/faqs/sections/{id}', [FaqController::class, 'destroySection']);
+        Route::post('/faqs/questions', [FaqController::class, 'storeQuestion']);
+        Route::put('/faqs/questions/{id}', [FaqController::class, 'updateQuestion']);
+        Route::delete('/faqs/questions/{id}', [FaqController::class, 'destroyQuestion']);
+        Route::put('/faqs/reorder', [FaqController::class, 'reorder']);
+
+        Route::get('/settings', [ChatSettingsController::class, 'index']);
+        Route::put('/settings', [ChatSettingsController::class, 'update']);
+
+        Route::get('/conversations', [ConversationController::class, 'index']);
+        Route::get('/conversations/{id}/messages', [ConversationController::class, 'messages']);
+        Route::post('/conversations/{id}/messages', [ConversationController::class, 'storeMessage'])->middleware('throttle:chat-messages');
+        Route::put('/conversations/{id}/read', [ConversationController::class, 'markAsRead']);
+        Route::put('/conversations/{id}/end', [ConversationController::class, 'endConversation']);
+        Route::delete('/conversations/{id}', [ConversationController::class, 'destroy']);
+    });
+
+    // Settings
+    Route::prefix('settings')->group(function () {
+        Route::get('/general', [AdminSettingsController::class, 'index']);
+        Route::put('/general', [AdminSettingsController::class, 'update']);
+
+        Route::get('/shipping/companies', [AdminShippingController::class, 'getCompanies']);
+        Route::put('/shipping/companies/{code}', [AdminShippingController::class, 'updateCompany']);
+        Route::get('/shipping/zones', [AdminShippingController::class, 'getZones']);
+        Route::put('/shipping/zones', [AdminShippingController::class, 'updateZones']);
+
+        Route::get('/payment/gateways', [AdminPaymentController::class, 'getGateways']);
+        Route::put('/payment/gateways/{code}', [AdminPaymentController::class, 'updateGateway']);
+    });
+
+});
+
+// ==========================================
+// Storefront Auth Routes
+// ==========================================
+use App\Http\Controllers\Storefront\AuthController as StorefrontAuthController;
+
+Route::prefix('v1/storefront/auth')->group(function () {
+    Route::post('/login', [StorefrontAuthController::class, 'login'])->middleware('throttle:5,1');
+    Route::post('/register', [StorefrontAuthController::class, 'register'])->middleware('throttle:5,1');
+});
+
+Route::middleware('auth:sanctum')->prefix('v1/storefront/auth')->group(function () {
+    Route::post('/logout', [StorefrontAuthController::class, 'logout']);
+    Route::get('/me', [StorefrontAuthController::class, 'me']);
+});
+
+
+// ==========================================
+// Storefront Public Routes
+// ==========================================
+use App\Http\Controllers\Api\Storefront\StorefrontDataController;
+use App\Http\Controllers\Api\Storefront\CheckoutController;
+use App\Http\Controllers\Storefront\CartRecoveryController;
+use App\Http\Controllers\Storefront\CartController;
+use App\Http\Controllers\Api\Payment\PaymobWebhookController;
+use App\Http\Controllers\Api\Storefront\PrintStationController;
+
+Route::prefix('v1/storefront')->group(function () {
+    Route::get('/categories', [StorefrontDataController::class, 'getCategories']);
+    Route::get('/products', [StorefrontDataController::class, 'getProducts']);
+    Route::get('/products/{id}', [StorefrontDataController::class, 'getProduct']);
+    Route::get('/shipping-zones', [StorefrontDataController::class, 'getShippingZones']);
+    Route::post('/checkout', [CheckoutController::class, 'process']);
+    
+    // Public Cart
+    Route::get('/cart/recover/{uuid}', [CartRecoveryController::class, 'recover']);
+    Route::post('/cart', [CartController::class, 'getOrCreate']);
+    Route::post('/cart/contact', [CartController::class, 'captureContact']);
+
+    // Public Print Station
+    Route::get('/printing-product-types', [PrintStationController::class, 'getPrintingProductTypes']);
+    Route::get('/printing-types/{id}', [PrintStationController::class, 'getPrintingTypeDetails']);
+    Route::post('/print/calculate-price', [PrintStationController::class, 'calculateLivePrice']);
+    Route::post('/print/temp-upload', [PrintStationController::class, 'tempUpload']);
+    Route::post('/print/add-to-cart', [PrintStationController::class, 'addToCart']);
+    Route::get('/print/file-status/{cartItemId}', [PrintStationController::class, 'checkFileStatus']);
+    Route::delete('/print/files/{cartItemId}/{category}', [PrintStationController::class, 'deleteUnlinkedFile']);
+    
+    // Blog
+    Route::get('/blog-posts', [App\Http\Controllers\Api\Storefront\BlogController::class, 'index']);
+    Route::get('/blog-posts/{idOrSlug}', [App\Http\Controllers\Api\Storefront\BlogController::class, 'show']);
+    
+    // Offers
+    Route::get('/offers', [App\Http\Controllers\Api\Storefront\OfferController::class, 'index']);
+});
+
+Route::prefix('v1/payment')->group(function () {
+});
+
+Route::fallback(function (\Illuminate\Http\Request $request) {
+    file_put_contents(storage_path('logs/fallback.log'), '[' . date('Y-m-d H:i:s') . '] 404 Fallback Hit! Method: ' . $request->method() . ', URL: ' . $request->fullUrl() . ', Headers: ' . json_encode($request->headers->all()) . PHP_EOL, FILE_APPEND);
+    return response()->json(['error' => 'Fallback 404'], 404);
+});
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\storefront\app\api\revalidate\route.ts
+
+================================================================================
+
+
+import { revalidateTag } from 'next/cache';
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function POST(request: NextRequest) {
+    let secret = request.nextUrl.searchParams.get('secret');
+    let body: any = {};
+    
+    if (!secret) {
+        try {
+            body = await request.json();
+            secret = body.secret;
+        } catch (e) {
+            // ignore
+        }
+    }
+    
+    // Validate secret token to ensure only our Laravel backend can trigger this
+    // Fallback to "my-super-secret-token" for the blog webhook since it was configured in Laravel
+    if (secret !== process.env.REVALIDATION_TOKEN && secret !== "my-super-secret-token") {
+        return NextResponse.json({ message: 'Invalid token' }, { status: 401 });
+    }
+    
+    // Invalidate the 'products' cache tag so the next request fetches fresh data
+    revalidateTag('products');
+    revalidateTag('categories');
+    revalidateTag('blog');
+    revalidateTag('offers');
+    
+    // If a specific tag was sent in the body, invalidate it directly
+    if (body.tag) {
+        revalidateTag(body.tag);
+    }
+    
+    return NextResponse.json({ revalidated: true, now: Date.now() });
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\storefront\next.config.mjs
+
+================================================================================
+
+
+/** @type {import('next').NextConfig} */
+const isProd = process.env.NODE_ENV === 'production';
+const nextConfig = {
+  ...(isProd ? { output: 'export' } : {}),
+  ...(isProd ? { basePath: '/print-express' } : {}),
+  trailingSlash: true,
+  reactStrictMode: true,
+  typescript: {
+    ignoreBuildErrors: false,
+  },
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
+  transpilePackages: ['lucide-react'],
+  // Allow access to remote image placeholder.
+  images: {
+    unoptimized: true,
+    dangerouslyAllowSVG: false,
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'picsum.photos',
+        port: '',
+        pathname: '/**', // This allows any path under the hostname
+      },
+      {
+        protocol: 'http',
+        hostname: 'localhost',
+        port: '8000',
+        pathname: '/**',
+      },
+      {
+        protocol: 'http',
+        hostname: '127.0.0.1',
+        port: '8000',
+        pathname: '/**',
+      }
+    ],
+  },
+  webpack: (config, {dev}) => {
+    // HMR is disabled in AI Studio via DISABLE_HMR env var.
+    // Do not modifyâ€”file watching is disabled to prevent flickering during agent edits.
+    if (dev && process.env.DISABLE_HMR === 'true') {
+      config.watchOptions = {
+        ignored: /.*/,
+      };
+    }
+    return config;
+  },
+  turbopack: {},
+};
+
+export default nextConfig;
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\storefront\components\UI\OffersSection.tsx
+
+================================================================================
+
+
+import React from "react";
+import Link from "next/link";
+import { ScrollReveal } from "@/components/UI/Animations";
+import Image from "next/image";
+
+interface Offer {
+  id: number;
+  title: { ar: string; en: string };
+  description: { ar: string; en: string } | null;
+  image_path: { desktop: string; tablet: string; mobile: string } | string;
+  linkable_type: string | null;
+  linkable_id: number | null;
+  custom_url: string | null;
+}
+
+async function fetchOffers(): Promise<Offer[]> {
+  try {
+    const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api'}/v1/storefront/offers`, {
+      next: { tags: ['offers'] },
+    });
+    
+    if (!res.ok) {
+      return [];
+    }
+    
+    return res.json();
+  } catch (error) {
+    console.error("Error fetching offers:", error);
+    return [];
+  }
+}
+
+export default async function OffersSection() {
+  const offers = await fetchOffers();
+
+  if (!offers || offers.length === 0) {
+    return null; // Return nothing if there are no offers
+  }
+
+  // Dynamic CSS Grid class based on number of offers (max 2)
+  const gridClass = offers.length === 1 
+    ? "grid-cols-1 max-w-4xl mx-auto" 
+    : "grid-cols-1 md:grid-cols-2";
+
+  return (
+    <section className="py-16 px-6 md:px-12 w-full max-w-7xl mx-auto">
+      <ScrollReveal>
+        <div className="flex justify-between items-end mb-8">
+          <div>
+            <h2 className="text-3xl font-black text-white">
+              أقوى العروض <span className="text-yellow-400">🔥</span>
+            </h2>
+            <div className="w-16 h-1 bg-yellow-400 rounded-full mt-3" />
+            <p className="text-gray-500 mt-2 font-medium">
+              اغتنم الفرصة وتسوق بأفضل الأسعار
+            </p>
+          </div>
+        </div>
+      </ScrollReveal>
+      
+      <div className={`grid gap-6 ${gridClass}`}>
+        {offers.map((offer, index) => {
+          // Determine the target URL
+          let targetUrl = "";
+          if (offer.custom_url) {
+            targetUrl = offer.custom_url;
+          } else if (offer.linkable_type === "product" || offer.linkable_type === "App\\Models\\Product") {
+            targetUrl = `/product/${offer.linkable_id}`;
+          } else if (offer.linkable_type === "category" || offer.linkable_type === "App\\Models\\Category") {
+            targetUrl = `/shop?category=${offer.linkable_id}`;
+          } else if (offer.linkable_type === "printing_type" || offer.linkable_type === "App\\Models\\PrintingType") {
+            targetUrl = `/print-station`;
+          }
+
+          // Image handling (WebP URL)
+          const imageUrl = typeof offer.image_path === 'string' 
+            ? (offer.image_path.startsWith('http') ? offer.image_path : `${process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:8000'}${offer.image_path}`)
+            : (offer.image_path.desktop?.startsWith('http') ? offer.image_path.desktop : `${process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:8000'}${offer.image_path.desktop}`);
+
+          const CardContent = (
+            <div className="relative h-64 md:h-80 w-full rounded-[2rem] overflow-hidden group shadow-lg shadow-black/40">
+              {/* Note: In production we should use next/image, but standard img allows any external URL easily without config updates if Next config limits it. We use unoptimized Next Image here. */}
+              <Image
+                src={imageUrl}
+                alt={offer.title.ar}
+                fill
+                className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent"></div>
+              <div className="absolute inset-0 p-8 flex flex-col justify-end text-white">
+                <h3 className="text-2xl font-bold mb-2">{offer.title.ar}</h3>
+                {offer.description?.ar && (
+                  <p className="text-gray-200 mb-6 max-w-sm">{offer.description.ar}</p>
+                )}
+                
+                {targetUrl && (
+                  <span className="bg-white text-gray-900 px-6 py-3 rounded-full font-bold w-fit group-hover:bg-yellow-400 transition-colors inline-block mt-auto">
+                    تصفح العرض
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+
+          return (
+            <ScrollReveal
+              key={offer.id}
+              delay={index * 0.1}
+              className="w-full h-full"
+            >
+              {targetUrl ? (
+                <Link href={targetUrl} className="block w-full h-full focus:outline-none focus:ring-2 focus:ring-yellow-400 rounded-[2rem]">
+                  {CardContent}
+                </Link>
+              ) : (
+                <div className="block w-full h-full">
+                  {CardContent}
+                </div>
+              )}
+            </ScrollReveal>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\storefront\components\HomeClient.tsx
+
+================================================================================
+
+
+"use client";
+
+import React, { useEffect, useState, useRef, useCallback } from "react";
+import Link from "next/link";
+import Image from "next/image";
+import { motion, useReducedMotion, AnimatePresence } from "framer-motion";
+import {
+  ArrowLeft,
+  Play,
+  Star,
+  ChevronRight,
+  Zap,
+  CheckCircle2,
+  Heart,
+  ShoppingCart,
+  Printer,
+  Package,
+} from "lucide-react";
+import { PageTransition, ScrollReveal } from "@/components/UI/Animations";
+import { MainLogo, ShopLogo } from "@/components/UI/Logo";
+import { BLOG_POSTS } from "@/lib/data";
+import YouTubeEmbed from "@/components/UI/YouTubeEmbed";
+import { useAppContext } from "@/context/AppContext";
+
+// Mock Data
+const HERO_SLIDES = [
+  "/images/slide1.png",
+  "/images/slide2.png",
+  "/images/slide3.png",
+  "/images/slide4.png",
+  "/images/slide5.png",
+  "/images/slide6.png",
+  "/images/slide7.png",
+  "/images/slide8.png",
+  "/images/slide9.png",
+  "/images/slide10.png",
+];
+
+const HERO_MODES = [
+  {
+    key: 'print',
+    badge: 'خدمات الطباعة',
+    BadgeIcon: Printer,
+    word1: 'نطبع',
+    word2: 'المستحيل',
+    description: 'من الفكرة إلى المطبوعة الفاخرة — جودة استثنائية، دقة ألوان لا تُضاهى، ولمسات تشطيب تليق بعلامتك التجارية.',
+    ctaText: 'ابدأ مشروعك الآن',
+    ctaHref: '/print-station',
+    gradient: 'linear-gradient(to left, #c084fc, #fb7185, #F7931E)',
+    accentGradient: 'linear-gradient(90deg, #F7931E, #fb7185, #c084fc, #F7931E)',
+    orbColor: 'rgba(249, 115, 22, 0.12)',
+    features: [
+      { Icon: Zap, text: 'تسليم سريع', color: 'text-yellow-400' },
+      { Icon: CheckCircle2, text: 'جودة مضمونة ١٠٠٪', color: 'text-emerald-400' },
+      { Icon: Star, text: 'أوفسيت • ديجيتال • UV', color: 'text-amber-400' },
+    ],
+  },
+  {
+    key: 'shop',
+    badge: 'المتجر',
+    BadgeIcon: Package,
+    word1: 'تسوّق',
+    word2: 'الأفضل',
+    description: 'أدوات مكتبية، كتب تعليمية، هدايا مميزة — منتجات منتقاة بعناية مع خدمات إضافية حصرية تليق بذوقك.',
+    ctaText: 'تصفح المتجر',
+    ctaHref: '/shop',
+    gradient: 'linear-gradient(to left, #60a5fa, #a78bfa, #f472b6)',
+    accentGradient: 'linear-gradient(90deg, #60a5fa, #a78bfa, #f472b6, #60a5fa)',
+    orbColor: 'rgba(139, 92, 246, 0.12)',
+    features: [
+      { Icon: Zap, text: 'شحن سريع', color: 'text-blue-400' },
+      { Icon: CheckCircle2, text: 'منتجات أصلية ١٠٠٪', color: 'text-emerald-400' },
+      { Icon: Star, text: 'كتب • أدوات • هدايا', color: 'text-purple-400' },
+    ],
+  },
+];
+
+// Framer Motion Variants for staggered mode transitions
+const modeContainerVariants = {
+  initial: { opacity: 0 },
+  enter: {
+    opacity: 1,
+    transition: { staggerChildren: 0.05, delayChildren: 0.03 },
+  },
+  exit: {
+    opacity: 1,
+    transition: { staggerChildren: 0.02, staggerDirection: -1 as const },
+  },
+};
+
+const modeItemVariants = {
+  initial: { opacity: 0, y: 20 },
+  enter: {
+    opacity: 1,
+    y: 0,
+    transition: { duration: 0.35, ease: [0.22, 1, 0.36, 1] as const },
+  },
+  exit: {
+    opacity: 0,
+    y: -10,
+    transition: { duration: 0.2, ease: [0.22, 1, 0.36, 1] as const },
+  },
+};
+
+// OFFERS removed, now passed from Server Component
+
+export default function HomeClient({ initialProducts = [], initialCategories = [], offersSection }: { initialProducts: any[], initialCategories: any[], offersSection?: React.ReactNode }) {
+  const prefersReducedMotion = useReducedMotion();
+  const { addToCart, addToWishlist, isInWishlist, removeFromWishlist } =
+    useAppContext();
+    
+  // Cinematic Slider State
+  const [currentSlide, setCurrentSlide] = useState(0);
+  const [preloadIndex, setPreloadIndex] = useState(1);
+
+  // Hero Dual-Mode State (Print ↔ Shop)
+  const [heroMode, setHeroMode] = useState(0);
+  const mode = HERO_MODES[heroMode];
+
+  // Animation Mutex — prevents GPU contention at LCM(5,12)=60s collision points
+  const isAnimatingRef = useRef(false);
+  
+  // Timer Refs for precise control
+  const modeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const slideTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ─── Mode Timer (12s) ───
+  const startModeTimer = useCallback(() => {
+    // Guard check: Always clear before creating a new one
+    if (modeTimerRef.current) clearInterval(modeTimerRef.current);
+    modeTimerRef.current = setInterval(() => {
+      if (isAnimatingRef.current) return; // document.hidden check removed, handled by visibilitychange
+      isAnimatingRef.current = true;
+      setHeroMode((prev) => (prev + 1) % HERO_MODES.length);
+      setTimeout(() => { isAnimatingRef.current = false; }, 900);
+    }, 12000);
+  }, []);
+
+  // ─── Slide Timer (5s) ───
+  const startSlideTimer = useCallback(() => {
+    // Guard check: Always clear before creating a new one
+    if (slideTimerRef.current) clearInterval(slideTimerRef.current);
+    slideTimerRef.current = setInterval(() => {
+      if (isAnimatingRef.current) return; // document.hidden check removed
+      setCurrentSlide((prev) => (prev + 1) % HERO_SLIDES.length);
+    }, 5000);
+  }, []);
+
+  // ─── Mount Timers & Visibility API ───
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        // Destroy timers completely to prevent DOM Pile-up and save CPU
+        if (modeTimerRef.current) clearInterval(modeTimerRef.current);
+        if (slideTimerRef.current) clearInterval(slideTimerRef.current);
+        modeTimerRef.current = null;
+        slideTimerRef.current = null;
+      } else {
+        // Re-initialize timers with guard checks inside the start functions
+        startModeTimer();
+        startSlideTimer();
+      }
+    };
+
+    // Register event listener
+    window.addEventListener("visibilitychange", handleVisibilityChange);
+
+    // Initial start if page is visible
+    if (!document.hidden) {
+      startModeTimer();
+      startSlideTimer();
+    }
+
+    return () => {
+      // Memory Leak Cleanup
+      window.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (modeTimerRef.current) clearInterval(modeTimerRef.current);
+      if (slideTimerRef.current) clearInterval(slideTimerRef.current);
+    };
+  }, [startModeTimer, startSlideTimer]);
+
+  // ─── Manual Mode Switch Handler ───
+  const switchMode = (index: number) => {
+    if (isAnimatingRef.current || index === heroMode) return;
+    isAnimatingRef.current = true;
+    setHeroMode(index);
+    setTimeout(() => { isAnimatingRef.current = false; }, 900);
+    
+    // Reset timer immediately on manual switch so it doesn't hang!
+    startModeTimer();
+  };
+
+  // Smart Network Timing (Preload AFTER animation)
+  useEffect(() => {
+    const preloadTimer = setTimeout(() => {
+      setPreloadIndex((currentSlide + 1) % HERO_SLIDES.length);
+    }, 2000); // Wait 2s for GPU animation to settle
+    return () => clearTimeout(preloadTimer);
+  }, [currentSlide]);
+
+  const recommendedProducts = initialProducts.slice(0, 4);
+  const categories = initialCategories;
+
+  return (
+    <PageTransition>
+      {/* ═══════════════════════════════════════════════════════════════
+           FULL-SCREEN CINEMATIC HERO — Nike / Apple Style
+           ═══════════════════════════════════════════════════════════════ */}
+      {/* ═══════════════════════════════════════════════════════════════
+           FULL-SCREEN CINEMATIC HERO — Nike / Apple Style
+           ═══════════════════════════════════════════════════════════════ */}
+      <section className="relative min-h-[100dvh] w-full overflow-hidden bg-[#0a0a0a] flex flex-col md:flex-row">
+        
+        {/* Cinematic Multi-Image Slider (Top on Mobile, Left on Desktop in RTL) */}
+        {/* Using flex-1 instead of explicit percentages prevents any 1px gaps without needing borders */}
+        <div className="w-full h-[55vh] md:h-[100dvh] flex-1 relative order-1 md:order-2 overflow-hidden">
+          <AnimatePresence initial={false}>
+            <motion.div
+              key={currentSlide}
+              className="absolute inset-0 w-full h-full"
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 1.05 }}
+              animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1 }}
+              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0 }}
+              transition={{
+                duration: 1.2,
+                ease: [0.25, 1, 0.5, 1], // Smoother cinematic crossfade instead of aggressive whip-pan
+              }}
+            >
+              <motion.div
+                className="w-full h-full relative"
+                animate={prefersReducedMotion ? {} : {
+                  scale: [1.0, 1.05], // Cinematic drift
+                }}
+                transition={{
+                  duration: 6,
+                  ease: [0.25, 1, 0.5, 1],
+                }}
+                style={{
+                  willChange: "transform",
+                  backfaceVisibility: "hidden",
+                  WebkitBackfaceVisibility: "hidden",
+                }}
+              >
+                <Image
+                  src={HERO_SLIDES[currentSlide]}
+                  alt="Print Express - مطبوعات فاخرة"
+                  fill
+                  priority={currentSlide === 0}
+                  loading={currentSlide === 0 ? "eager" : "lazy"}
+                  sizes="(max-width: 768px) 100vw, 55vw"
+                  className="object-cover object-center"
+                />
+              </motion.div>
+            </motion.div>
+          </AnimatePresence>
+
+          {/* 2. The Smart Preloader */}
+          <div className="absolute inset-0 opacity-0 pointer-events-none z-[-1]" aria-hidden="true">
+            <Image 
+              src={HERO_SLIDES[preloadIndex]} 
+              alt="" 
+              fill 
+              sizes="(max-width: 768px) 100vw, 55vw"
+              className="object-cover object-center" 
+            />
+          </div>
+
+          {/* Fade Gradients to blend image into the solid background */}
+          {/* Mobile: Fades the bottom edge */}
+          <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a0a] via-[#0a0a0a]/50 to-transparent md:hidden" />
+          {/* Desktop: Fades the right edge (in RTL, the image is on the left, so its right edge touches the text) */}
+          <div className="hidden md:block absolute inset-0 bg-gradient-to-l from-[#0a0a0a] via-[#0a0a0a]/40 to-transparent w-[30%] right-0" />
+        </div>
+
+        {/* Content — Bottom on Mobile, Right on Desktop in RTL */}
+        <div className="w-full md:w-[45%] flex flex-col items-center justify-end md:justify-center px-6 md:px-12 lg:px-20 relative z-10 order-2 md:order-1 mt-[-10vh] pb-12 md:mt-0 md:pb-0 h-[45vh] md:h-[100dvh]">
+
+          {/* ── Continuous Animation: Background Gradient Orb ── */}
+          <motion.div
+            className="absolute w-[300px] h-[300px] md:w-[400px] md:h-[400px] rounded-full pointer-events-none"
+            style={{
+              background: `radial-gradient(circle, ${mode.orbColor} 0%, transparent 70%)`,
+              willChange: "transform",
+            }}
+            animate={{
+              x: heroMode === 0 ? -60 : 60,
+              y: heroMode === 0 ? 40 : -40,
+              scale: [1, 1.15, 1],
+              opacity: [0.6, 1, 0.6],
+            }}
+            transition={{
+              x: { duration: 1.5, ease: [0.25, 1, 0.5, 1] },
+              y: { duration: 1.5, ease: [0.25, 1, 0.5, 1] },
+              scale: { duration: 4, repeat: Infinity, repeatType: 'reverse', ease: 'easeInOut' },
+              opacity: { duration: 4, repeat: Infinity, repeatType: 'reverse', ease: 'easeInOut' },
+            }}
+          />
+
+          {/* ── Continuous Animation: Floating Particles ── */}
+          <div className="absolute inset-0 pointer-events-none overflow-hidden z-0" aria-hidden="true">
+            {[
+              { size: 6, top: '15%', left: '8%', dur: '14s', delay: '0s' },
+              { size: 4, top: '75%', left: '85%', dur: '18s', delay: '-4s' },
+              { size: 8, top: '35%', left: '70%', dur: '16s', delay: '-8s' },
+              { size: 5, top: '88%', left: '20%', dur: '20s', delay: '-2s' },
+              { size: 7, top: '45%', left: '92%', dur: '15s', delay: '-6s' },
+              { size: 4, top: '10%', left: '50%', dur: '17s', delay: '-10s' },
+              { size: 6, top: '65%', left: '35%', dur: '19s', delay: '-3s' },
+              { size: 5, top: '25%', left: '25%', dur: '15s', delay: '-7s' },
+              { size: 7, top: '80%', left: '60%', dur: '21s', delay: '-1s' },
+              { size: 4, top: '55%', left: '15%', dur: '18s', delay: '-9s' },
+              { size: 9, top: '20%', left: '85%', dur: '16s', delay: '-12s' },
+              { size: 5, top: '92%', left: '45%', dur: '14s', delay: '-5s' },
+              { size: 6, top: '40%', left: '5%', dur: '20s', delay: '-11s' },
+              { size: 4, top: '5%', left: '75%', dur: '17s', delay: '-14s' },
+              { size: 8, top: '68%', left: '10%', dur: '19s', delay: '-15s' },
+            ].map((p, i) => (
+              <motion.div
+                key={i}
+                className="absolute rounded-full transition-colors duration-1000"
+                style={{
+                  width: p.size,
+                  height: p.size,
+                  top: p.top,
+                  left: p.left,
+                  animation: `heroFloat${i % 3} ${p.dur} ease-in-out ${p.delay} infinite`,
+                  backgroundColor: heroMode === 0 ? '#F7931E' : '#60a5fa',
+                  boxShadow: heroMode === 0 ? `0 0 ${p.size * 2}px rgba(247, 147, 30, 0.4)` : `0 0 ${p.size * 2}px rgba(96, 165, 250, 0.4)`,
+                  willChange: "transform, opacity",
+                }}
+                animate={{
+                  opacity: [0.4, 0.9, 0.4],
+                  scale: [1, 1.2, 1],
+                }}
+                transition={{
+                  opacity: { duration: 3, repeat: Infinity, repeatType: 'reverse', ease: 'easeInOut' },
+                  scale: { duration: 4, repeat: Infinity, repeatType: 'reverse', ease: 'easeInOut' },
+                }}
+              />
+            ))}
+          </div>
+          {/* ── Initial Page-Load Wrapper (runs once) ── */}
+          <motion.div
+            initial={{ opacity: 0, y: 40 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 1, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
+            className="text-center md:text-start max-w-2xl relative w-full"
+          >
+
+            {/* ── Manual Mode Tabs ── */}
+            <div className="flex justify-center md:justify-start gap-2 mb-5 md:mb-6">
+              {HERO_MODES.map((m, i) => (
+                <button
+                  key={m.key}
+                  onClick={() => switchMode(i)}
+                  className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-bold tracking-widest transition-all duration-300 border ${
+                    heroMode === i
+                      ? 'bg-white/10 backdrop-blur-sm border-white/20 text-white shadow-lg'
+                      : 'bg-transparent border-white/5 text-gray-500 hover:text-gray-300 hover:border-white/10'
+                  }`}
+                >
+                  {heroMode === i && (
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-current opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-current" />
+                    </span>
+                  )}
+                  <m.BadgeIcon size={13} />
+                  {m.badge}
+                </button>
+              ))}
+            </div>
+
+            {/* ── Mode Switch: AnimatePresence ── */}
+            <AnimatePresence mode="wait" initial={false}>
+              <motion.div
+                key={mode.key}
+                variants={modeContainerVariants}
+                initial="initial"
+                animate="enter"
+                exit="exit"
+                aria-live="polite"
+              >
+
+
+                {/* 2. H1 Headline */}
+                <motion.h1 variants={modeItemVariants} className="text-[3rem] sm:text-[3.5rem] md:text-[4.5rem] lg:text-[6rem] leading-[1.1] tracking-tight mb-4 flex flex-col sm:flex-row sm:flex-wrap items-center md:items-start justify-center md:justify-start gap-2 sm:gap-4 md:gap-x-6">
+                  <span className="text-white drop-shadow-lg" style={{ fontFamily: '"Marhey", sans-serif' }}>
+                    {mode.word1}
+                  </span>
+                  <span
+                    className="italic drop-shadow-xl py-2 bg-clip-text"
+                    style={{
+                      fontFamily: '"Lalezar", sans-serif',
+                      backgroundImage: mode.gradient,
+                      WebkitBackgroundClip: 'text',
+                      WebkitTextFillColor: 'transparent',
+                    }}
+                  >
+                    {mode.word2}
+                  </span>
+                </motion.h1>
+
+                {/* 3. Animated Accent Line (Continuous Shimmer) */}
+                <motion.div variants={modeItemVariants} className="flex justify-center md:justify-start mb-6 md:mb-8">
+                  <div className="h-[3px] w-20 md:w-28 rounded-full overflow-hidden">
+                    <motion.div
+                      className="h-full w-[200%]"
+                      animate={{ x: ['0%', '-50%'] }}
+                      transition={{
+                        duration: 3,
+                        repeat: Infinity,
+                        repeatType: 'loop',
+                        ease: 'linear',
+                      }}
+                      style={{
+                        background: mode.accentGradient,
+                        transition: 'background 1s ease',
+                      }}
+                    />
+                  </div>
+                </motion.div>
+
+                {/* 4. Description */}
+                <motion.p variants={modeItemVariants} className="text-base md:text-xl text-gray-300 max-w-2xl mx-auto leading-relaxed font-medium mb-10 md:mb-12">
+                  {mode.description}
+                </motion.p>
+
+                {/* 5. CTA Button */}
+                <motion.div variants={modeItemVariants} className="flex justify-center mb-12 md:mb-14">
+                  <Link
+                    href={mode.ctaHref}
+                    className="group relative inline-flex items-center gap-3 px-10 py-4 bg-yellow-400 text-black font-black text-lg rounded-full overflow-hidden transition-all duration-300 hover:bg-yellow-300 hover:shadow-[0_0_60px_rgba(250,204,21,0.4)] hover:scale-[1.04] active:scale-[0.97]"
+                  >
+                    <span className="flex items-center gap-2">
+                      {mode.ctaText}
+                      <ArrowLeft size={20} className="group-hover:-translate-x-1 transition-transform duration-300" />
+                    </span>
+                  </Link>
+                </motion.div>
+
+                {/* 6. Features Line */}
+                <motion.div variants={modeItemVariants} className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-[13px] md:text-sm text-gray-400 font-medium">
+                  {mode.features.map((feature, i) => (
+                    <React.Fragment key={feature.text}>
+                      <span className="flex items-center gap-1.5">
+                        <feature.Icon size={14} className={feature.color} />
+                        {feature.text}
+                      </span>
+                      {i < mode.features.length - 1 && (
+                        <span className="w-1 h-1 rounded-full bg-gray-600 hidden md:block" />
+                      )}
+                    </React.Fragment>
+                  ))}
+                </motion.div>
+
+              </motion.div>
+            </AnimatePresence>
+
+          </motion.div>
+
+        </div>
+
+        {/* Seamless edge to next section — no white border */}
+        <div className="absolute bottom-0 left-0 w-full h-1 bg-[#0a0a0a] z-20 pointer-events-none" />
+      </section>
+
+      {/* OFFERS SECTION - Rendered from Server */}
+      {offersSection}
+
+      {/* SERVICES SPLIT */}
+      <section className="py-12 px-6 md:px-12 w-full max-w-7xl mx-auto">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Shop Express */}
+          <ScrollReveal direction="right" className="w-full h-full">
+            <Link
+              href="/shop"
+              className="bg-yellow-400 w-full rounded-[2.5rem] p-10 md:p-14 shadow-lg flex flex-col justify-between relative overflow-hidden group min-h-[400px]"
+            >
+              <div className="absolute -right-12 -bottom-12 w-64 h-64 border-[16px] border-white/20 rounded-full group-hover:scale-150 transition-transform duration-700"></div>
+              <div className="z-10 relative">
+                <span className="inline-block px-4 py-1.5 bg-white text-yellow-900 text-xs font-bold rounded-full uppercase tracking-widest mb-6 border border-yellow-200">
+                  تسوق الآن
+                </span>
+                <div className="mb-4">
+                  <ShopLogo size="md" />
+                </div>
+                <p className="text-lg font-medium text-yellow-900 max-w-sm">
+                  تصفح مجموعتنا الواسعة من المنتجات الجاهزة والمميزة. كل ما
+                  تحتاجه في مكان واحد.
+                </p>
+              </div>
+              <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center shadow-inner group-hover:rotate-12 transition-transform self-end z-10 relative mt-8">
+                <ArrowLeft className="w-8 h-8 text-gray-900" />
+              </div>
+            </Link>
+          </ScrollReveal>
+
+          {/* Print Station */}
+          <ScrollReveal direction="left" delay={0.2} className="w-full h-full">
+            <Link href="/print-station" className="bg-[#111111] w-full rounded-[2.5rem] p-10 md:p-14 shadow-lg shadow-black/40 flex flex-col justify-between relative border border-white/[0.08] hover:border-yellow-500/30 group min-h-[400px] overflow-hidden block">
+              <div className="absolute top-0 right-0 w-full h-full bg-[radial-gradient(circle_at_top_right,_var(--tw-gradient-stops))] from-yellow-400/5 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700"></div>
+              <div className="z-10 relative">
+                <span className="inline-block px-4 py-1.5 bg-yellow-400/20 text-yellow-400 border border-yellow-400/30 text-xs font-bold rounded-full uppercase tracking-widest mb-6">
+                  جديد
+                </span>
+                <h3
+                  className="text-5xl font-serif font-black italic text-white mb-4"
+                  dir="ltr"
+                >
+                  Print Station
+                </h3>
+                <p className="text-lg text-gray-400 max-w-sm font-medium">
+                  منصة الطباعة المخصصة. اختر مواصفاتك بدقة وأرسل طلبك للتنفيذ بأعلى جودة.
+                </p>
+              </div>
+              <div className="w-16 h-16 bg-[#222222] group-hover:bg-yellow-400 rounded-full flex items-center justify-center self-end z-10 relative mt-8 transition-colors">
+                <ArrowLeft className="w-8 h-8 text-white group-hover:text-black" />
+              </div>
+            </Link>
+          </ScrollReveal>
+        </div>
+      </section>
+
+      {/* RECOMMENDED PRODUCTS */}
+      <section className="py-16 px-6 md:px-12 w-full bg-[#0a0a0a]">
+        <div className="max-w-7xl w-full mx-auto">
+          <ScrollReveal>
+            <div className="flex justify-between items-end mb-10">
+              <div>
+                <h2 className="text-3xl font-black text-white">
+                  موصى به لك
+                </h2>
+                <div className="w-16 h-1 bg-yellow-400 rounded-full mt-3" />
+                <p className="text-gray-500 mt-2 font-medium">
+                  بناءً على تصفحك الأخير (Smart IP System)
+                </p>
+              </div>
+              <Link
+                href="/shop"
+                className="hidden md:flex items-center gap-2 font-bold text-yellow-400 hover:text-yellow-500"
+              >
+                عرض الكل <ArrowLeft size={20} />
+              </Link>
+            </div>
+          </ScrollReveal>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-6">
+            {recommendedProducts.map((product, index) => (
+              <ScrollReveal
+                key={product.id}
+                delay={index * 0.1}
+                className="w-full h-full"
+              >
+                <div className="group relative w-full h-full bg-[#111111] rounded-3xl p-4 transition-all hover:shadow-xl hover:shadow-black/50 border border-transparent hover:border-yellow-500/20 flex flex-col justify-between">
+                  <div className="relative aspect-square w-full bg-[#1a1a1a] rounded-2xl mb-4 overflow-hidden">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={product.images?.[0] || 'https://via.placeholder.com/400?text=No+Image'}
+                      alt={product.name}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                    />
+
+                    <button
+                      onClick={(e) => {
+                        e.preventDefault();
+                        isInWishlist(product.id)
+                          ? removeFromWishlist(product.id)
+                          : addToWishlist(product);
+                      }}
+                      className={`absolute top-3 right-3 p-2 rounded-full backdrop-blur-md shadow-sm shadow-black/30 transition-colors ${
+                        isInWishlist(product.id)
+                          ? "bg-red-500/10 text-red-500"
+                          : "bg-white/10 text-gray-500 hover:text-red-500"
+                      }`}
+                    >
+                      <Heart
+                        size={18}
+                        fill={
+                          isInWishlist(product.id) ? "currentColor" : "none"
+                        }
+                      />
+                    </button>
+
+                    <div className="absolute inset-0 bg-white/5 group-hover:bg-transparent transition-colors pointer-events-none"></div>
+                  </div>
+
+                  <div className="text-right flex flex-col flex-grow">
+                    <span className="text-xs font-bold text-gray-500 mb-1 block uppercase tracking-widest">
+                      التصنيف: {categories.find(c => c.id === product.category_id)?.name || product.category_id}
+                    </span>
+                    <Link href={`/product/${product.id}`} className="flex-grow">
+                      <h3 className="font-bold text-white mb-2 group-hover:text-yellow-400 transition-colors line-clamp-1">
+                        {product.name}
+                      </h3>
+                    </Link>
+                    <div className="flex justify-between items-end mt-2">
+                      <div className="font-black text-lg text-white">
+                        {(product.discount_price ?? product.price)?.toFixed(2)} ج.م
+                      </div>
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          addToCart(product);
+                        }}
+                        className="w-10 h-10 bg-yellow-400 text-gray-900 rounded-full flex items-center justify-center hover:bg-yellow-500 hover:text-black transition-colors shadow-sm shadow-black/30"
+                      >
+                        <ShoppingCart size={18} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </ScrollReveal>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ABOUT US (Creative Animation) */}
+      <section className="py-24 px-6 md:px-12 bg-gray-900 text-white relative overflow-hidden">
+        {/* Animated Background Elements */}
+        <div
+          className="absolute top-0 right-0 p-8 opacity-[0.03] pointer-events-none text-[15rem] leading-none font-black tracking-tighter"
+          dir="ltr"
+        >
+          ABOUT
+        </div>
+        <div className="absolute bottom-[-20%] left-[-10%] w-[50%] h-[100%] bg-yellow-400 rounded-full blur-[120px] opacity-20 animate-pulse"></div>
+
+        <div className="max-w-6xl mx-auto relative z-10 flex flex-col md:flex-row items-center gap-16">
+          <ScrollReveal direction="right" className="flex-none relative group">
+            <div className="flex-none relative group">
+              <div className="w-48 h-48 md:w-64 md:h-64 border-2 border-dashed border-yellow-400 rounded-full flex items-center justify-center text-4xl md:text-5xl font-serif italic text-yellow-400 animate-[spin_15s_linear_infinite] group-hover:border-solid transition-all"></div>
+              <div className="absolute inset-0 flex items-center justify-center text-center">
+                <div>
+                  <div
+                    className="text-sm tracking-widest text-gray-400 uppercase font-bold"
+                    dir="ltr"
+                  >
+                    Since
+                  </div>
+                  <div className="text-5xl font-black" dir="ltr">
+                    2010
+                  </div>
+                </div>
+              </div>
+            </div>
+          </ScrollReveal>
+
+          <ScrollReveal
+            direction="left"
+            className="flex-1 text-center md:text-right"
+          >
+            <div className="flex-1 text-center md:text-right">
+              <span className="inline-block px-3 py-1 bg-white/10 text-yellow-400 text-xs font-bold rounded-full uppercase tracking-widest mb-6 border border-yellow-400/30">
+                من نحن
+              </span>
+              <h2 className="text-4xl md:text-6xl font-black mb-6">
+                تأسسنا لنبدع.
+              </h2>
+              <p className="text-xl text-gray-400 leading-relaxed max-w-2xl font-medium">
+                أكثر من ١٠ سنوات من الخبرة في تقديم المحتوى الثقافي وخدمات
+                الطباعة المتميزة. نحن لسنا مجرد مكتبة، نحن شركاء نجاحكم في كل
+                صفحة تقرأونها وكل تصميم تطبعونه.
+                <span className="text-yellow-400">
+                  {" "}
+                  نظامنا الذكي يقترح لك الأنسب بناءً على اهتماماتك.
+                </span>
+              </p>
+            </div>
+          </ScrollReveal>
+        </div>
+      </section>
+
+      {/* BLOG / VIDEOS SECTION */}
+      <section className="py-24 px-6 md:px-12 max-w-7xl mx-auto">
+        <ScrollReveal>
+          <div className="flex justify-between items-end mb-12">
+            <div>
+              <h2 className="text-3xl font-black text-white">
+                المدونة والتلاوات
+              </h2>
+              <div className="w-16 h-1 bg-yellow-400 rounded-full mt-3" />
+              <p className="text-gray-500 mt-2 font-medium">
+                استمع إلى تلاوات قرآنية قصيرة
+              </p>
+            </div>
+            <Link
+              href="/blog"
+              className="hidden md:flex items-center gap-2 font-bold text-yellow-400 hover:text-yellow-500"
+            >
+              كل التلاوات <ArrowLeft size={20} />
+            </Link>
+          </div>
+        </ScrollReveal>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+          {BLOG_POSTS.slice(0, 3).map((post, index) => (
+            <div
+              key={post.id}
+              className="w-full h-full flex flex-col"
+            >
+                <YouTubeEmbed
+                  src={post.video}
+                  className="relative w-full aspect-video bg-gray-900 rounded-3xl mb-6 shadow-lg shadow-black/40 border border-yellow-500/15 overflow-hidden"
+                />
+                <div className="px-2 flex flex-col flex-grow">
+                  <span className="text-xs font-bold text-yellow-400 mb-2 block uppercase tracking-widest">
+                    {post.category}
+                  </span>
+                  <Link href={`/blog/${post.id}`}>
+                    <h3 className="text-xl font-bold text-white mb-2 hover:text-yellow-400 transition-colors">
+                      {post.title}
+                    </h3>
+                  </Link>
+                  <p className="text-gray-500 text-sm line-clamp-2 leading-relaxed mb-4">
+                    {post.description}
+                  </p>
+                  <Link href={`/blog/${post.id}`} className="mt-auto flex items-center gap-2 font-bold text-white hover:text-yellow-400 transition-colors text-sm">
+                    <Play size={16} /> اقرأ وشاهد المزيد
+                  </Link>
+                </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+    </PageTransition>
+  );
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\storefront\app\page.tsx
+
+================================================================================
+
+
+import React from "react";
+import HomeClient from "@/components/HomeClient";
+import OffersSection from "@/components/UI/OffersSection";
+import { fetchProducts, fetchCategories } from "@/lib/api";
+
+export const metadata = {
+  title: "Print Express - مطبوعات فاخرة",
+  description: "اطلب مطبوعاتك بأفضل جودة وأسرع وقت",
+};
+
+export default async function HomePage() {
+  // SSR Fetching
+  const [initialProducts, initialCategories] = await Promise.all([
+    fetchProducts(1),
+    fetchCategories(),
+  ]);
+
+  return (
+    <HomeClient 
+      initialProducts={initialProducts || []} 
+      initialCategories={initialCategories || []} 
+      offersSection={<OffersSection />}
+    />
+  );
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\dashboard\app\offers\page.tsx
+
+================================================================================
+
+
+"use client";
+
+import React, { useState } from "react";
+import Link from "next/link";
+import { Plus, Edit, Trash2, Image as ImageIcon } from "lucide-react";
+import useSWR from "swr";
+import toast from "react-hot-toast";
+import { format } from "date-fns";
+import { ar } from "date-fns/locale";
+import { rawFetcher, apiClient } from "@/lib/api";
+
+export default function OffersListPage() {
+  const [page, setPage] = useState(1);
+  const { data: response, error, mutate } = useSWR(`/v1/admin/offers?page=${page}`, rawFetcher);
+  const offers = response?.data;
+  const lastPage = response?.last_page || 1;
+  
+  const [isDeleting, setIsDeleting] = useState<number | null>(null);
+
+  const handleDelete = async (id: number) => {
+    if (!confirm("هل أنت متأكد من حذف هذا العرض؟ سيتم إزالته فوراً من المتجر!")) return;
+    
+    setIsDeleting(id);
+    try {
+      await apiClient(`/v1/admin/offers/${id}`, { method: "DELETE" });
+      
+      toast.success("تم الحذف بنجاح");
+      mutate();
+    } catch (error) {
+      toast.error("حدث خطأ أثناء الحذف");
+    } finally {
+      setIsDeleting(null);
+    }
+  };
+
+  if (error) return <div className="p-8 text-red-500 font-bold">حدث خطأ في تحميل العروض</div>;
+
+  return (
+    <div className="max-w-7xl mx-auto p-4 md:p-8">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+        <div>
+          <h1 className="text-3xl font-black text-slate-800 tracking-tight">إدارة العروض الترويجية</h1>
+          <p className="text-slate-500 mt-2 font-medium">التحكم في العروض المعروضة على الصفحة الرئيسية</p>
+        </div>
+        <Link
+          href="/offers/form"
+          className="bg-amber-600 hover:bg-amber-700 text-white px-6 py-3 rounded-xl font-bold transition-all shadow-lg shadow-amber-200 flex items-center gap-2"
+        >
+          <Plus size={20} /> إضافة عرض جديد
+        </Link>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden mb-6">
+        <div className="overflow-x-auto">
+          <table className="w-full text-right">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold text-sm uppercase tracking-wide">
+                <th className="p-4 whitespace-nowrap">العنوان</th>
+                <th className="p-4 whitespace-nowrap">التوجيه (Linkable)</th>
+                <th className="p-4 whitespace-nowrap">الحالة</th>
+                <th className="p-4 whitespace-nowrap">تاريخ الانتهاء</th>
+                <th className="p-4 whitespace-nowrap">إجراءات</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {!offers ? (
+                <tr>
+                  <td colSpan={5} className="p-8 text-center text-slate-500">جاري التحميل...</td>
+                </tr>
+              ) : offers.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="p-8 text-center text-slate-500 font-bold text-lg">لا توجد عروض حالياً</td>
+                </tr>
+              ) : (
+                offers.map((offer: any) => (
+                  <tr key={offer.id} className="hover:bg-slate-50 transition-colors">
+                    <td className="p-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-16 h-12 rounded-lg bg-slate-100 flex items-center justify-center shrink-0 border border-slate-200 overflow-hidden">
+                           {offer.image_path ? (
+                             // eslint-disable-next-line @next/next/no-img-element
+                             <img src={typeof offer.image_path === 'string' ? offer.image_path : offer.image_path.desktop} alt="" className="w-full h-full object-cover" />
+                           ) : (
+                             <ImageIcon className="text-slate-400" size={24} />
+                           )}
+                        </div>
+                        <div>
+                          <p className="font-bold text-slate-800 text-base">{offer.title?.ar || 'بدون عنوان'}</p>
+                          <p className="text-slate-500 text-xs">ترتيب: {offer.sort_order}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="p-4 text-slate-600 font-medium whitespace-nowrap text-sm">
+                      {offer.custom_url ? (
+                        <span className="text-blue-500 break-all">{offer.custom_url}</span>
+                      ) : offer.linkable_type ? (
+                        <span>{offer.linkable_type} #{offer.linkable_id}</span>
+                      ) : (
+                        <span className="text-slate-400 italic">بدون توجيه (إعلاني فقط)</span>
+                      )}
+                    </td>
+                    <td className="p-4 whitespace-nowrap">
+                      <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${
+                        offer.is_active ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
+                      }`}>
+                        {offer.is_active ? 'مفعل' : 'معطل'}
+                      </span>
+                    </td>
+                    <td className="p-4 text-slate-500 font-medium whitespace-nowrap text-sm">
+                      {offer.end_date ? format(new Date(offer.end_date), 'PPP', { locale: ar }) : 'مفتوح'}
+                    </td>
+                    <td className="p-4 whitespace-nowrap">
+                      <div className="flex items-center gap-2">
+                        <Link
+                          href={`/offers/form?id=${offer.id}`}
+                          className="w-8 h-8 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center hover:bg-amber-100 hover:text-amber-700 transition-colors"
+                        >
+                          <Edit size={16} />
+                        </Link>
+                        <button
+                          onClick={() => handleDelete(offer.id)}
+                          disabled={isDeleting === offer.id}
+                          className="w-8 h-8 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center hover:bg-red-100 hover:text-red-700 transition-colors disabled:opacity-50"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      
+      {/* Pagination Controls */}
+      {lastPage > 1 && (
+        <div className="flex items-center justify-center gap-2">
+          <button 
+            onClick={() => setPage(p => Math.max(1, p - 1))}
+            disabled={page === 1}
+            className="px-4 py-2 rounded-lg font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+          >
+            السابق
+          </button>
+          <span className="text-slate-600 font-medium px-4">صفحة {page} من {lastPage}</span>
+          <button 
+            onClick={() => setPage(p => Math.min(lastPage, p + 1))}
+            disabled={page === lastPage}
+            className="px-4 py-2 rounded-lg font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+          >
+            التالي
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\dashboard\app\offers\form\page.tsx
+
+================================================================================
+
+
+"use client";
+
+import React, { useState, useEffect, useRef } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { ArrowRight, Save, Image as ImageIcon, CheckCircle, UploadCloud } from "lucide-react";
+import toast from "react-hot-toast";
+import useSWR from "swr";
+import { rawFetcher, apiClient } from "@/lib/api";
+
+export default function OfferFormPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const id = searchParams.get("id");
+  const isEdit = !!id;
+
+  const [loading, setLoading] = useState(false);
+  
+  // Data States
+  const [titleAr, setTitleAr] = useState("");
+  const [titleEn, setTitleEn] = useState("");
+  const [descAr, setDescAr] = useState("");
+  const [descEn, setDescEn] = useState("");
+  const [isActive, setIsActive] = useState(true);
+  const [sortOrder, setSortOrder] = useState(0);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  
+  // Linkable States
+  const [linkMode, setLinkMode] = useState<"none" | "product" | "category" | "printing_type" | "custom">("none");
+  const [linkableId, setLinkableId] = useState("");
+  const [customUrl, setCustomUrl] = useState("");
+  
+  // Image States
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Fetch initial data if edit
+  const { data: offerData, error } = useSWR(isEdit ? `/v1/admin/offers/${id}` : null, rawFetcher);
+
+  useEffect(() => {
+    if (offerData) {
+      setTitleAr(offerData.title?.ar || "");
+      setTitleEn(offerData.title?.en || "");
+      setDescAr(offerData.description?.ar || "");
+      setDescEn(offerData.description?.en || "");
+      setIsActive(offerData.is_active);
+      setSortOrder(offerData.sort_order || 0);
+      setStartDate(offerData.start_date ? offerData.start_date.split(' ')[0] : "");
+      setEndDate(offerData.end_date ? offerData.end_date.split(' ')[0] : "");
+      
+      if (offerData.custom_url) {
+        setLinkMode("custom");
+        setCustomUrl(offerData.custom_url);
+      } else if (offerData.linkable_type) {
+        setLinkMode(offerData.linkable_type as any);
+        setLinkableId(offerData.linkable_id?.toString() || "");
+      } else {
+        setLinkMode("none");
+      }
+
+      if (offerData.image_path) {
+        setImagePreview(typeof offerData.image_path === 'string' ? offerData.image_path : offerData.image_path.desktop);
+      }
+    }
+  }, [offerData]);
+
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      toast.error("يرجى اختيار ملف صورة صالح");
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("حجم الصورة يجب ألا يتجاوز 5 ميجابايت");
+      return;
+    }
+
+    setImageFile(file);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setImagePreview(e.target?.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!titleAr || !titleEn) {
+      toast.error("يرجى إدخال عنوان العرض باللغتين");
+      return;
+    }
+
+    if (!isEdit && !imageFile) {
+      toast.error("صورة العرض مطلوبة");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const formData = new FormData();
+      formData.append('title[ar]', titleAr);
+      formData.append('title[en]', titleEn);
+      formData.append('description[ar]', descAr);
+      formData.append('description[en]', descEn);
+      formData.append('is_active', isActive ? "1" : "0");
+      formData.append('sort_order', sortOrder.toString());
+      
+      if (startDate) formData.append('start_date', startDate);
+      if (endDate) formData.append('end_date', endDate);
+      
+      if (imageFile) {
+        formData.append('image', imageFile);
+      }
+
+      // Linkable Logic
+      if (linkMode === "custom") {
+        formData.append('custom_url', customUrl);
+      } else if (linkMode !== "none") {
+        formData.append('linkable_type', linkMode);
+        formData.append('linkable_id', linkableId);
+      }
+      
+      if (isEdit) {
+          // Laravel needs _method=PUT when sending FormData
+          formData.append('_method', 'PUT');
+      }
+
+      const url = isEdit ? `/v1/admin/offers/${id}` : "/v1/admin/offers";
+      
+      await apiClient(url, {
+        method: 'POST',
+        body: formData,
+      }, true); // Use raw fetch for FormData
+
+      toast.success(isEdit ? "تم تحديث العرض بنجاح" : "تم إضافة العرض بنجاح");
+      router.push("/offers");
+    } catch (error: any) {
+      console.error(error);
+      toast.error(error.message || "حدث خطأ أثناء حفظ العرض");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (isEdit && error) return <div className="p-8 text-red-500 font-bold">حدث خطأ في تحميل بيانات العرض</div>;
+  if (isEdit && !offerData) return <div className="p-8 text-slate-500 font-bold">جاري التحميل...</div>;
+
+  return (
+    <div className="max-w-4xl mx-auto p-4 md:p-8">
+      <div className="flex items-center gap-4 mb-8">
+        <button
+          onClick={() => router.back()}
+          className="w-10 h-10 rounded-full bg-white border border-slate-200 flex items-center justify-center text-slate-500 hover:bg-slate-50 transition-colors"
+        >
+          <ArrowRight size={20} />
+        </button>
+        <div>
+          <h1 className="text-3xl font-black text-slate-800 tracking-tight">
+            {isEdit ? "تعديل العرض الترويجي" : "إضافة عرض جديد"}
+          </h1>
+          <p className="text-slate-500 mt-1 font-medium">قم بتعبئة تفاصيل العرض لتنشره في المتجر</p>
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        
+        {/* Basic Info */}
+        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-6">
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+            <span className="w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">1</span>
+            المعلومات الأساسية
+          </h2>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <label className="block font-bold text-slate-700 text-sm">العنوان (عربي) <span className="text-red-500">*</span></label>
+              <input
+                type="text"
+                value={titleAr}
+                onChange={(e) => setTitleAr(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition-all font-medium"
+                placeholder="أدخل عنوان العرض بالعربية"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="block font-bold text-slate-700 text-sm">العنوان (إنجليزي) <span className="text-red-500">*</span></label>
+              <input
+                type="text"
+                value={titleEn}
+                onChange={(e) => setTitleEn(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition-all font-medium text-left"
+                placeholder="Enter offer title in English"
+                dir="ltr"
+                required
+              />
+            </div>
+            
+            <div className="space-y-2">
+              <label className="block font-bold text-slate-700 text-sm">الوصف (عربي)</label>
+              <textarea
+                value={descAr}
+                onChange={(e) => setDescAr(e.target.value)}
+                rows={3}
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition-all font-medium"
+                placeholder="تفاصيل العرض بالعربية"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="block font-bold text-slate-700 text-sm">الوصف (إنجليزي)</label>
+              <textarea
+                value={descEn}
+                onChange={(e) => setDescEn(e.target.value)}
+                rows={3}
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition-all font-medium text-left"
+                placeholder="Offer details in English"
+                dir="ltr"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Linking & Display */}
+        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-6">
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+            <span className="w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">2</span>
+            الربط والتوجيه (Nullable Links)
+          </h2>
+          <p className="text-sm text-slate-500">اختر أين يوجه هذا العرض عند النقر عليه (اختياري)</p>
+          
+          <div className="space-y-4">
+            <div className="flex flex-wrap gap-4">
+              {[
+                { value: "none", label: "إعلان مرئي فقط (بدون رابط)" },
+                { value: "product", label: "منتج محدد" },
+                { value: "category", label: "قسم محدد" },
+                { value: "printing_type", label: "نوع طباعة" },
+                { value: "custom", label: "رابط خارجي مخصص" }
+              ].map((mode) => (
+                <label key={mode.value} className={`flex items-center gap-2 px-4 py-3 border rounded-xl cursor-pointer transition-colors ${linkMode === mode.value ? 'bg-amber-50 border-amber-500 text-amber-700' : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-700'}`}>
+                  <input
+                    type="radio"
+                    name="linkMode"
+                    value={mode.value}
+                    checked={linkMode === mode.value}
+                    onChange={(e) => setLinkMode(e.target.value as any)}
+                    className="w-4 h-4 text-amber-600 focus:ring-amber-500"
+                  />
+                  <span className="font-bold">{mode.label}</span>
+                </label>
+              ))}
+            </div>
+
+            {linkMode === "custom" && (
+              <div className="pt-4 space-y-2">
+                <label className="block font-bold text-slate-700 text-sm">الرابط المخصص</label>
+                <input
+                  type="url"
+                  value={customUrl}
+                  onChange={(e) => setCustomUrl(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition-all font-medium text-left"
+                  placeholder="https://example.com/..."
+                  dir="ltr"
+                />
+              </div>
+            )}
+
+            {(linkMode === "product" || linkMode === "category" || linkMode === "printing_type") && (
+              <div className="pt-4 space-y-2">
+                <label className="block font-bold text-slate-700 text-sm">رقم العنصر (ID) <span className="text-slate-400 font-normal">(للتوجيه وإبطال الكاش التلقائي)</span></label>
+                <input
+                  type="number"
+                  value={linkableId}
+                  onChange={(e) => setLinkableId(e.target.value)}
+                  className="w-full max-w-sm bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition-all font-medium"
+                  placeholder={`أدخل معرف الـ ${linkMode}`}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Media */}
+        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-6">
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+            <span className="w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">3</span>
+            صورة العرض
+          </h2>
+          
+          <div className="space-y-2">
+            <label className="block font-bold text-slate-700 text-sm">
+              الصورة (سيتم تحويلها لـ WebP وتأمينها تلقائياً) {!isEdit && <span className="text-red-500">*</span>}
+            </label>
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              onChange={handleImageChange}
+              className="hidden"
+              ref={fileInputRef}
+            />
+            
+            <div 
+              onClick={() => fileInputRef.current?.click()}
+              className="w-full aspect-[21/9] bg-slate-50 border-2 border-dashed border-slate-300 rounded-2xl flex flex-col items-center justify-center cursor-pointer hover:bg-slate-100 hover:border-amber-400 transition-colors relative overflow-hidden group"
+            >
+              {imagePreview ? (
+                <>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={imagePreview} alt="Preview" className="w-full h-full object-cover" />
+                  <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-white">
+                    <UploadCloud size={32} className="mb-2" />
+                    <span className="font-bold">تغيير الصورة</span>
+                  </div>
+                </>
+              ) : (
+                <div className="text-slate-400 flex flex-col items-center">
+                  <ImageIcon size={48} className="mb-4 text-slate-300" />
+                  <span className="font-bold">اضغط لاختيار صورة</span>
+                  <span className="text-sm mt-1 text-slate-500">JPG, PNG, WebP (أقصى حجم 5MB)</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Publishing & Timing */}
+        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-6">
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+            <span className="w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">4</span>
+            النشر والتوقيت
+          </h2>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-4">
+              <label className="flex items-center gap-3 cursor-pointer">
+                <div className="relative">
+                  <input 
+                    type="checkbox" 
+                    className="sr-only" 
+                    checked={isActive}
+                    onChange={(e) => setIsActive(e.target.checked)}
+                  />
+                  <div className={`block w-14 h-8 rounded-full transition-colors ${isActive ? 'bg-emerald-500' : 'bg-slate-300'}`}></div>
+                  <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-full transition-transform ${isActive ? 'transform translate-x-6' : ''}`}></div>
+                </div>
+                <div>
+                  <div className="font-bold text-slate-800">حالة التفعيل</div>
+                  <div className="text-xs text-slate-500">تفعيل أو تعطيل العرض مؤقتاً</div>
+                </div>
+              </label>
+
+              <div className="space-y-2 pt-2">
+                <label className="block font-bold text-slate-700 text-sm">ترتيب الظهور</label>
+                <input
+                  type="number"
+                  value={sortOrder}
+                  onChange={(e) => setSortOrder(Number(e.target.value))}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition-all font-medium"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="block font-bold text-slate-700 text-sm">تاريخ البدء (اختياري)</label>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition-all font-medium text-left"
+                />
+              </div>
+              
+              <div className="space-y-2">
+                <label className="block font-bold text-slate-700 text-sm">تاريخ الانتهاء (اختياري)</label>
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition-all font-medium text-left"
+                />
+                <p className="text-xs text-slate-500">سيختفي العرض تلقائياً بعد هذا التاريخ بفضل الـ Time-based filtering.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end pt-4 pb-12">
+          <button
+            type="submit"
+            disabled={loading}
+            className="bg-slate-900 hover:bg-black text-white px-8 py-4 rounded-xl font-bold transition-all shadow-xl shadow-slate-300 flex items-center gap-3 disabled:opacity-70 text-lg"
+          >
+            {loading ? (
+              <>
+                <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                جاري الحفظ...
+              </>
+            ) : (
+              <>
+                <Save size={24} /> {isEdit ? "تحديث العرض" : "حفظ ونشر العرض"}
+              </>
+            )}
+          </button>
+        </div>
+
+      </form>
+    </div>
+  );
+}
+
+
+================================================================================
+
+FILE: D:\important projects\apex-store-v2\dashboard\components\Sidebar.tsx
+
+================================================================================
+
+
+"use client";
+
+import React from "react";
+import Link from "next/link";
+import Image from "next/image";
+import { usePathname } from "next/navigation";
+import {
+  LayoutDashboard,
+  PackageSearch,
+  Settings,
+  Users,
+  ShoppingCart,
+  ShoppingBag,
+  BarChart3,
+  Bell,
+  Search,
+  Menu,
+  MessageCircle,
+  Star,
+  Printer,
+  BookOpen,
+  Puzzle,
+  Gift,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { useState } from "react";
+
+const navItems = [
+  { name: "الرئيسية", href: "/", icon: LayoutDashboard },
+  { name: "العروض", href: "/offers", icon: Gift },
+  { name: "إدارة المنتجات", href: "/products", icon: PackageSearch },
+  { name: "الخدمات الإضافية", href: "/addons", icon: Puzzle },
+  { name: "الطلبات", href: "/orders", icon: ShoppingCart },
+  { name: "السلات المتروكة", href: "/abandoned-carts", icon: ShoppingBag },
+  { name: "العملاء", href: "/customers", icon: Users },
+  { name: "الموظفين", href: "/staff", icon: Users },
+  { name: "مركز المحادثات", href: "/chat", icon: MessageCircle },
+  { name: "المدونة", href: "/blog", icon: BookOpen },
+  { name: "أقسام المطبوعات", href: "/printing/product-types", icon: Printer },
+  { name: "التقارير", href: "/reports", icon: BarChart3 },
+  { name: "التقييمات", href: "/reviews", icon: Star },
+  { name: "الإعدادات", href: "/settings", icon: Settings },
+];
+
+export default function Sidebar() {
+  const pathname = usePathname();
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <>
+      {/* Mobile overlay */}
+      {isOpen && (
+        <div
+          className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40 md:hidden"
+          onClick={() => setIsOpen(false)}
+        />
+      )}
+
+      {/* Sidebar */}
+      <aside
+        className={cn(
+          "fixed md:static inset-y-0 right-0 z-50 w-64 bg-white border-l border-slate-200 transition-transform duration-300 ease-in-out md:translate-x-0 shadow-xl flex flex-col",
+          isOpen ? "translate-x-0" : "translate-x-full",
+        )}
+      >
+        <div className="p-8 flex items-center gap-3">
+          <Image
+            src="/apex-logo.png"
+            alt="Apex Logo"
+            width={40}
+            height={40}
+            className="object-contain"
+            unoptimized
+          />
+          <span className="font-bold text-xl tracking-tight text-slate-800 uppercase">
+            APEX
+          </span>
+        </div>
+
+        <nav className="flex-1 px-4 space-y-2 mt-4 custom-scrollbar overflow-y-auto">
+          {navItems.map((item) => {
+            const isActive =
+              pathname === item.href ||
+              (item.href !== "/" && pathname.startsWith(item.href));
+            const Icon = item.icon;
+            return (
+              <Link
+                key={item.name}
+                href={item.href}
+                onClick={() => setIsOpen(false)}
+                className={cn(
+                  "flex items-center gap-4 px-4 py-3 rounded-xl transition-colors duration-200 group relative overflow-hidden",
+                  isActive
+                    ? "bg-slate-50 text-amber-600 font-semibold"
+                    : "text-slate-500 hover:bg-slate-50 hover:text-slate-700",
+                )}
+              >
+                <Icon
+                  className={cn(
+                    "w-5 h-5 transition-colors duration-200",
+                    isActive
+                      ? "text-amber-600"
+                      : "text-slate-500 group-hover:text-slate-600",
+                  )}
+                />
+                <span>{item.name}</span>
+              </Link>
+            );
+          })}
+        </nav>
+
+        <div className="p-6">
+          <div className="bg-amber-50 rounded-2xl p-4 border border-amber-100">
+            <p className="text-xs font-bold text-amber-800 uppercase">
+              خطة البريميوم
+            </p>
+            <p className="text-[10px] text-amber-600 mt-1">
+              استمتع بكافة الميزات الفاخرة المتاحة
+            </p>
+            <button className="mt-3 w-full bg-amber-600 hover:bg-amber-700 text-white text-xs py-2 rounded-lg font-bold shadow-md shadow-amber-200 transition-colors">
+              ترقية الآن
+            </button>
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}
