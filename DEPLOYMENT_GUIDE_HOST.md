@@ -106,44 +106,51 @@ git pull origin main
 
 ---
 
-## ⚡ 4. تشغيل التطبيقات في الخلفية على المنافذ الرسمية (PM2)
+## ⚡ 4. تشغيل وإدارة التطبيقات (PM2 Ecosystem & LiteSpeed LSPHP)
 
-> التطبيقات مدمجة بالكامل مع حزمها التشغيلية (Zero-Dependency Standalone Bundle)، وتعمل فوراً عبر Node.js:
+### أ) الباك إند (Laravel 11) - يعمل تلقائياً عبر LiteSpeed LSPHP:
+تم ربط النطاق الفرعي `api.printexpress.com.eg` مباشرة بالمجلد `/home/kyanfash/apex-backend/public`، ويعمل عبر محرك LiteSpeed PHP الأصلي (LSPHP) مع دعم كامل لـ OPcache وإدارة الموارد دون الحاجة لأي عمليات PM2.
 
+### ب) المتجر ولوحة التحكم - يعملان عبر ملف الإدارة الموحد `~/ecosystem.config.js`:
 ```bash
-# 1. إيقاف أي عمليات سابقة إن وجدت
+# 1. إيقاف وحذف أي عمليات قديمة في PM2
 pm2 delete all
 
-# 2. تشغيل الباك إند (Port: 2080)
-cd ~/apex-backend
-pm2 start "php artisan serve --host=127.0.0.1 --port=2080" --name "apex-backend"
+# 2. تشغيل المتجر والداشبورد بالقيود الصارمة للذاكرة (350M Max RAM)
+pm2 start /home/kyanfash/ecosystem.config.js
 
-# 3. تشغيل المتجر (Port: 2000)
-cd ~/printexpress.com.eg
-PORT=2000 HOSTNAME=127.0.0.1 pm2 start .next/standalone/server.js --name "apex-storefront"
-
-# 4. تشغيل لوحة التحكم (Port: 2050)
-cd ~/admin.printexpress.com.eg
-PORT=2050 HOSTNAME=127.0.0.1 pm2 start .next/standalone/server.js --name "apex-dashboard"
-
-# 5. حفظ العمليات لتعمل تلقائياً عند إعادة تشغيل السيرفر
-pm2 save
+# 3. حفظ الحالة في PM2
+pm2 save --force
 ```
 
 ---
 
-## 🔒 5. توجيه المسارات وشبكة الأمان (.htaccess)
+## 🛡️ 5. الحارس التلقائي الدوري (Watchdog Script & Cron)
 
-الملفات موجودة بالفعل داخل المستودعات، وهي تقوم بالآتي:
-1. في `~/printexpress.com.eg/.htaccess`:
-   - أي مسار يبدأ بـ `/api/` يتم تحويله داخلياً وسريعاً للبورت `2080` (Laravel).
-   - بقية المتجر يتم تحويله للبورت `2000` (Next.js Storefront).
-2. في `~/admin.printexpress.com.eg/.htaccess`:
-   - يتم تحويل كل طلبات لوحة التحكم للبورت `2050` (Next.js Dashboard).
+لحماية التطبيقات من السقوط أو الـ 503 وإعادتها للعمل فوراً عند إعادة تشغيل السيرفر الفيزيائي أو حدوث أي خلل:
+```bash
+# إعطاء صلاحية التنفيذ لسكربت الحارس
+chmod +x /home/kyanfash/watchdog.sh
+
+# إضافة الفحص الدوري كل 3 دقائق في Crontab بأمان
+(crontab -l 2>/dev/null | grep -Fv "watchdog.sh"; echo "*/3 * * * * /home/kyanfash/watchdog.sh >/dev/null 2>&1") | crontab -
+```
 
 ---
 
-## 🔑 6. بيانات الدخول الافتراضية للوحة التحكم (Admin Credentials)
+## 🔒 6. توجيه المسارات وشبكة الأمان (.htaccess)
+
+الملفات تقوم بالآتي:
+1. في `~/printexpress.com.eg/.htaccess`:
+   - أي طلب يبدأ بـ `/api/` أو `/storage/` يتم تحويله لـ `https://api.printexpress.com.eg` (LSPHP).
+   - بقية المتجر يتم تحويله للبورت `2000` (Next.js Storefront).
+2. في `~/admin.printexpress.com.eg/.htaccess`:
+   - أي طلب لـ `/api/` أو `/storage/` يتم تحويله لـ `https://api.printexpress.com.eg` (LSPHP).
+   - بقية طلبات لوحة التحكم يتم تحويلها للبورت `2050` (Next.js Dashboard).
+
+---
+
+## 🔑 7. بيانات الدخول الافتراضية للوحة التحكم (Admin Credentials)
 
 - **الرابط:** `https://admin.printexpress.com.eg`
 - **البريد الإلكتروني:** `test@example.com`
